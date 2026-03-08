@@ -1,0 +1,221 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Resourcing</title>
+    <style>
+      body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:20px; background:#f0f7ff}
+      .card{border:1px solid #ddd;padding:12px;margin-bottom:12px;border-radius:6px}
+      label{display:block;margin-top:8px}
+      input,select,textarea{width:100%;padding:8px;margin-top:4px}
+      .row{display:flex;gap:12px}
+      .col{flex:1}
+      button{padding:8px 12px}
+      .small{font-size:90%;color:#555}
+    </style>
+  </head>
+  <body>
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h1 style="margin:0">Resourcing - CV uploads</h1>
+      <div id="authControls"></div>
+    </div>
+
+    <div id="loginCard" class="card" style="max-width:420px">
+      <h3>Login</h3>
+      <form id="loginForm">
+        <label>Username<input name="username" required></label>
+        <label>Password<input type="password" name="password" required></label>
+        <div style="margin-top:8px"><button>Login</button> <span id="loginMsg" class="small"></span></div>
+      </form>
+    </div>
+
+    <div id="mainUI" style="display:none">
+    <div class="card">
+      <h3>Upload CV</h3>
+  <form id="uploadForm">
+        <label>Name<input name="name" required></label>
+        <label>Role<input name="role"></label>
+        <label>Seniority<select name="seniority"><option value="">--</option><option>Junior</option><option>Mid</option><option>Senior</option></select></label>
+        <label>Skills (comma separated)<input name="skills"></label>
+        <label>CV file<input type="file" name="cv" accept=".pdf,.doc,.docx" required></label>
+        <div style="margin-top:8px"><button>Upload</button> <span id="uploadMsg" class="small"></span></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Filter candidates</h3>
+      <div class="row">
+        <div class="col"><input id="qName" placeholder="Name"></div>
+        <div class="col"><input id="qRole" placeholder="Role"></div>
+        <div class="col"><input id="qSkill" placeholder="Skill"></div>
+        <div class="col"><select id="qSeniority"><option value="">Any</option><option>Junior</option><option>Mid</option><option>Senior</option></select></div>
+        <div><button id="btnFilter">Search</button></div>
+      </div>
+      <div id="candidates"></div>
+    </div>
+
+    <div class="card">
+      <h3>Reports</h3>
+      <div id="report"></div>
+      <div style="display:flex;gap:12px;margin-top:12px;align-items:flex-start">
+        <div style="flex:1">
+          <canvas id="roleChart" style="max-width:100%"></canvas>
+        </div>
+        <div style="width:260px">
+          <canvas id="seniorityChart" style="max-width:100%"></canvas>
+        </div>
+      </div>
+      <div style="margin-top:8px"><button id="clearFilters">Clear filters</button></div>
+    </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+      const el = (id)=>document.getElementById(id);
+      async function loadCandidates(){
+        const params = new URLSearchParams();
+        ['qName','qRole','qSkill','qSeniority'].forEach(id=>{
+          const v = el(id.replace('q','')).value ?? '';
+        });
+      }
+
+      document.getElementById('uploadForm').addEventListener('submit', async e=>{
+        e.preventDefault();
+        const f = new FormData(e.target);
+  el('uploadMsg').textContent = 'Uploading...';
+  const r = await fetch('/api/upload', { method:'POST', body: f, credentials: 'include' });
+        const j = await r.json();
+        if(j.ok){ el('uploadMsg').textContent = 'Uploaded'; loadList(); loadReport(); e.target.reset(); }
+        else el('uploadMsg').textContent = j.error || 'Error';
+      });
+
+  async function loadList(){
+        const name = el('Name')?.value || '';
+        const role = el('Role')?.value || '';
+        const skill = el('Skill')?.value || '';
+        const seniority = el('Seniority')?.value || '';
+        // read from inputs with ids qName etc
+        const qName = el('qName').value.trim();
+        const qRole = el('qRole').value.trim();
+        const qSkill = el('qSkill').value.trim();
+        const qSen = el('qSeniority').value;
+        const params = new URLSearchParams();
+        if(qName) params.set('name', qName);
+        if(qRole) params.set('role', qRole);
+        if(qSkill) params.set('skill', qSkill);
+        if(qSen) params.set('seniority', qSen);
+  const res = await fetch('/api/candidates?'+params.toString(), { credentials: 'include' });
+        const j = await res.json();
+        const out = document.getElementById('candidates');
+        out.innerHTML = '';
+        if(!j.candidates || j.candidates.length===0){ out.textContent = 'No candidates found'; return }
+        j.candidates.forEach(c=>{
+          const d = document.createElement('div'); d.className='card';
+          d.innerHTML = `<strong>${c.name}</strong> <span class="small">${c.role} - ${c.seniority}</span><div class="small">Skills: ${c.skills.join(', ')}</div><div style="margin-top:6px"><a href="/cv/${c.filename}" target="_blank">Download CV</a></div>`;
+          out.appendChild(d);
+        });
+      }
+
+      function setFilter(field, value){
+        if(field === 'role') el('qRole').value = value;
+        if(field === 'seniority') el('qSeniority').value = value;
+        loadList();
+      }
+
+      document.getElementById('clearFilters').addEventListener('click', e=>{
+        el('qName').value=''; el('qRole').value=''; el('qSkill').value=''; el('qSeniority').value=''; loadList();
+      });
+
+      let roleChart = null;
+      let seniorityChart = null;
+      async function loadReport(){
+        const r = await fetch('/api/report', { credentials: 'include' });
+        const j = await r.json();
+        const elr = document.getElementById('report');
+        elr.innerHTML = '';
+        const total = j.total || 0;
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `<div><strong>Total candidates:</strong> ${total}</div>`;
+
+        // small clickable lists
+        function renderList(title, buckets, field){
+          const keys = Object.keys(buckets).sort((a,b)=>buckets[b]-buckets[a]);
+          const container = document.createElement('div');
+          container.style.marginTop='8px';
+          const h = document.createElement('strong'); h.textContent = title; container.appendChild(h);
+          keys.forEach(k=>{
+            const a = document.createElement('a'); a.href='#'; a.textContent = ` ${k} (${buckets[k]})`; a.style.display='inline-block'; a.style.margin='6px 6px 0 0'; a.addEventListener('click', ev=>{ ev.preventDefault(); setFilter(field, k); });
+            container.appendChild(a);
+          });
+          return container;
+        }
+
+        wrap.appendChild(renderList('Roles:', j.byRole || {}, 'role'));
+        wrap.appendChild(renderList('Seniorities:', j.bySeniority || {}, 'seniority'));
+        elr.appendChild(wrap);
+
+        // prepare chart data
+        const roleLabels = Object.keys(j.byRole || {});
+        const roleData = roleLabels.map(l => j.byRole[l]);
+        const senLabels = Object.keys(j.bySeniority || {});
+        const senData = senLabels.map(l => j.bySeniority[l]);
+
+        // destroy previous charts
+        if(roleChart) roleChart.destroy();
+        if(seniorityChart) seniorityChart.destroy();
+
+        const roleCtx = document.getElementById('roleChart').getContext('2d');
+        roleChart = new Chart(roleCtx, {
+          type: 'bar',
+          data: { labels: roleLabels, datasets: [{ label: 'Candidates', data: roleData, backgroundColor: '#3b82f6' }] },
+          options: { responsive:true, maintainAspectRatio:false, onClick: (evt, elems)=>{ if(elems.length){ const idx = elems[0].index; setFilter('role', roleLabels[idx]); } }, scales: { y: { beginAtZero:true, precision:0 } } }
+        });
+
+        const senCtx = document.getElementById('seniorityChart').getContext('2d');
+        seniorityChart = new Chart(senCtx, {
+          type: 'pie',
+          data: { labels: senLabels, datasets: [{ data: senData, backgroundColor: ['#60a5fa','#93c5fd','#bfdbfe'] }] },
+          options: { responsive:true, maintainAspectRatio:false, onClick: (evt, elems)=>{ if(elems.length){ const idx = elems[0].index; setFilter('seniority', senLabels[idx]); } } }
+        });
+      }
+
+      document.getElementById('btnFilter').addEventListener('click', e=>{ e.preventDefault(); loadList(); });
+
+      // login
+      function showLogin(){ el('loginCard').style.display='block'; }
+      function hideLogin(){ el('loginCard').style.display='none'; }
+
+      async function doLogout(){
+        await fetch('/api/logout', { method:'POST', credentials: 'include' });
+        hideLogin(); document.getElementById('mainUI').style.display='none'; updateAuthControls(false);
+      }
+
+      function updateAuthControls(loggedIn){
+        const c = el('authControls');
+        c.innerHTML = '';
+        if(loggedIn){
+          const btn = document.createElement('button'); btn.textContent='Logout'; btn.addEventListener('click', doLogout); c.appendChild(btn);
+        } else {
+          const btn = document.createElement('button'); btn.textContent='Login'; btn.addEventListener('click', ()=>{ showLogin(); }); c.appendChild(btn);
+        }
+      }
+
+      document.getElementById('loginForm').addEventListener('submit', async e=>{
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const body = { username: fd.get('username'), password: fd.get('password') };
+        el('loginMsg').textContent = 'Signing in...';
+        const r = await fetch('/api/login', { method:'POST', headers: { 'content-type':'application/json' }, body: JSON.stringify(body), credentials: 'include' });
+  if(r.ok){ el('loginMsg').textContent = 'OK'; hideLogin(); document.getElementById('mainUI').style.display='block'; updateAuthControls(true); loadList(); loadReport(); }
+  else { el('loginMsg').textContent = 'Invalid'; }
+      });
+
+      // check auth by trying report endpoint
+      (async ()=>{
+        const r = await fetch('/api/report', { credentials: 'include' });
+        if(r.ok){ hideLogin(); document.getElementById('mainUI').style.display='block'; updateAuthControls(true); loadList(); loadReport(); }
+        else { showLogin(); updateAuthControls(false); }
+      })();
+    </script>
+  </body>
+</html>
