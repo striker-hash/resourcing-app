@@ -57,7 +57,15 @@ function saveDb() {
 }
 loadDb();
 
-// Serve static frontend
+// Serve root: if user is authenticated, serve the SPA; otherwise serve a login-only page
+app.get('/', (req, res) => {
+  if (req.session && req.session.user) {
+    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  }
+  return res.sendFile(path.join(__dirname, 'public', 'login-only.html'));
+});
+
+// Serve static frontend assets
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Upload endpoint: metadata fields: name, role, skills (comma separated), seniority
@@ -98,6 +106,7 @@ app.post('/api/upload', requireAuth, upload.single('cv'), async (req, res) => {
     role: role || '',
     skills: (skills || '').split(',').map(s => s.trim()).filter(Boolean),
     seniority: seniority || '',
+    referredBy: req.body.referredBy || '',
   filename,
   path: storedPath,
   url: publicUrl,
@@ -109,18 +118,19 @@ app.post('/api/upload', requireAuth, upload.single('cv'), async (req, res) => {
 });
 
 // List candidates with optional filters: role, skill, seniority, name
-app.get('/api/candidates', (req, res) => {
-  const { role, skill, seniority, name } = req.query;
+app.get('/api/candidates', requireAuth, (req, res) => {
+  const { role, skill, seniority, name, referredBy } = req.query;
   let list = db.candidates.slice().reverse(); // newest first
   if (role) list = list.filter(c => c.role.toLowerCase().includes(role.toLowerCase()));
   if (seniority) list = list.filter(c => c.seniority.toLowerCase().includes(seniority.toLowerCase()));
   if (name) list = list.filter(c => c.name.toLowerCase().includes(name.toLowerCase()));
   if (skill) list = list.filter(c => c.skills.map(s => s.toLowerCase()).includes(skill.toLowerCase()));
+  if (referredBy) list = list.filter(c => (c.referredBy || '').toLowerCase().includes(referredBy.toLowerCase()));
   res.json({ ok: true, candidates: list });
 });
 
 // Simple reporting: counts by role and by seniority
-app.get('/api/report', (req, res) => {
+app.get('/api/report', requireAuth, (req, res) => {
   const byRole = {};
   const bySeniority = {};
   db.candidates.forEach(c => {
@@ -239,4 +249,13 @@ app.post('/api/login', (req, res) => {
 
 app.post('/api/logout', (req, res) => {
   req.session.destroy(err => { if(err) return res.status(500).json({ error: 'failed' }); res.json({ ok:true }); });
+});
+
+// Explicit logout route (GET) for browsers: destroy session, clear cookie and redirect to root
+app.get('/logout', (req, res) => {
+  req.session.destroy(err => {
+    // clear cookie
+    res.clearCookie('connect.sid');
+    return res.redirect('/');
+  });
 });
