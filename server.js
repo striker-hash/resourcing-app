@@ -1,5 +1,6 @@
 const express = require('express');
 const multer = require('multer');
+const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
@@ -24,20 +25,18 @@ function requireAuth(req, res, next){
   return res.status(401).json({ error: 'unauthenticated' });
 }
 
-// Storage for uploaded CVs (small scale): store in ./data/uploads
-const UPLOAD_DIR = path.join(__dirname, 'data', 'uploads');
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+// Supabase client (expects SUPABASE_URL and SUPABASE_KEY env vars)
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'cvs';
+let supabase = null;
+if(SUPABASE_URL && SUPABASE_KEY){
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+}
 
-// Multer config: store files on disk with original name + timestamp
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ts = Date.now();
-    const safe = file.originalname.replace(/[^a-zA-Z0-9.\-_/ ]/g, '_');
-    cb(null, `${ts}_${safe}`);
-  }
-});
-const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } }); // 5MB limit
+// Multer config: use memory storage and stream to Supabase
+const storage = multer.memoryStorage();
+const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
 
 // In-memory "database" of candidates (persisted to disk in JSON file)
 const DB_FILE = path.join(__dirname, 'data', 'db.json');
@@ -61,16 +60,46 @@ loadDb();
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Upload endpoint: metadata fields: name, role, skills (comma separated), seniority
-app.post('/api/upload', requireAuth, upload.single('cv'), (req, res) => {
+app.post('/api/upload', requireAuth, upload.single('cv'), async (req, res) => {
   const { name, role, skills, seniority } = req.body;
   if (!req.file) return res.status(400).json({ error: 'CV file is required (form field cv)' });
+
+  // create a safe filename
+  const ts = Date.now();
+  const safe = req.file.originalname.replace(/[^a-zA-Z0-9.\-_/ ]/g, '_');
+  const filename = `${ts}_${safe}`;
+
+  let storedPath = null;
+  let publicUrl = null;
+  if(supabase){
+    try{
+      // upload to supabase storage
+      const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).upload(filename, req.file.buffer, { cacheControl: '3600', upsert: false });
+      if(error) throw error;
+      // store the object path (we will generate signed URLs on download)
+      storedPath = data.path;
+    }catch(err){
+      console.error('Supabase upload error', err.message || err);
+      return res.status(500).json({ error: 'failed to upload to storage' });
+    }
+  } else {
+    // fallback: write to local uploads dir
+    const UPLOAD_DIR = path.join(__dirname, 'data', 'uploads');
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+    const outPath = path.join(UPLOAD_DIR, filename);
+    fs.writeFileSync(outPath, req.file.buffer);
+  publicUrl = `/cv/${filename}`; // local download endpoint still works
+  }
+
   const candidate = {
     id: Date.now().toString(36),
     name: name || 'Unknown',
     role: role || '',
     skills: (skills || '').split(',').map(s => s.trim()).filter(Boolean),
     seniority: seniority || '',
-    filename: path.basename(req.file.path),
+  filename,
+  path: storedPath,
+  url: publicUrl,
     uploadedAt: new Date().toISOString()
   };
   db.candidates.push(candidate);
@@ -102,9 +131,29 @@ app.get('/api/report', (req, res) => {
 
 // Download CV file
 app.get('/cv/:filename', requireAuth, (req, res) => {
-  const file = path.join(UPLOAD_DIR, req.params.filename);
-  if (!fs.existsSync(file)) return res.status(404).send('Not found');
-  res.download(file);
+  // try to find candidate by filename and redirect to stored URL
+  const candidate = db.candidates.find(c => c.filename === req.params.filename);
+  if(candidate && candidate.url){
+    // if stored in Supabase (path available), create signed URL
+    if(candidate.path && supabase){
+      const expires = parseInt(process.env.SIGNED_URL_EXPIRE || '300', 10);
+      supabase.storage.from(SUPABASE_BUCKET).createSignedUrl(candidate.path, expires)
+        .then(result => {
+          if(result.error) return res.status(500).send('failed to create signed url');
+          return res.redirect(result.signedURL);
+        }).catch(err => { console.error(err); res.status(500).send('error'); });
+      return;
+    }
+    // if url looks like a local path, serve it
+    if(candidate.url.startsWith('/cv/')){
+      const file = path.join(__dirname, 'data', 'uploads', req.params.filename);
+      if (!fs.existsSync(file)) return res.status(404).send('Not found');
+      return res.download(file);
+    }
+    return res.redirect(candidate.url);
+  }
+  // not found
+  res.status(404).send('Not found');
 });
 
 const PORT = process.env.PORT || 3000;
