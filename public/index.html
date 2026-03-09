@@ -38,6 +38,7 @@
         <label>Role<input name="role"></label>
         <label>Seniority<select name="seniority"><option value="">--</option><option>Junior</option><option>Mid</option><option>Senior</option></select></label>
         <label>Skills (comma separated)<input name="skills"></label>
+  <label>Referred by<input name="referredBy" placeholder="Name or source"></label>
         <label>CV file<input type="file" name="cv" accept=".pdf,.doc,.docx" required></label>
         <div style="margin-top:8px"><button>Upload</button> <span id="uploadMsg" class="small"></span></div>
       </form>
@@ -48,6 +49,7 @@
       <div class="row">
         <div class="col"><input id="qName" placeholder="Name"></div>
         <div class="col"><input id="qRole" placeholder="Role"></div>
+  <div class="col"><input id="qReferred" placeholder="Referred by"></div>
         <div class="col"><input id="qSkill" placeholder="Skill"></div>
         <div class="col"><select id="qSeniority"><option value="">Any</option><option>Junior</option><option>Mid</option><option>Senior</option></select></div>
         <div><button id="btnFilter">Search</button></div>
@@ -97,13 +99,15 @@
         // read from inputs with ids qName etc
         const qName = el('qName').value.trim();
         const qRole = el('qRole').value.trim();
-        const qSkill = el('qSkill').value.trim();
-        const qSen = el('qSeniority').value;
+  const qSkill = el('qSkill').value.trim();
+  const qSen = el('qSeniority').value;
+  const qRef = el('qReferred')?.value.trim();
         const params = new URLSearchParams();
         if(qName) params.set('name', qName);
         if(qRole) params.set('role', qRole);
         if(qSkill) params.set('skill', qSkill);
         if(qSen) params.set('seniority', qSen);
+  if(qRef) params.set('referredBy', qRef);
   const res = await fetch('/api/candidates?'+params.toString(), { credentials: 'include' });
         const j = await res.json();
         const out = document.getElementById('candidates');
@@ -111,7 +115,7 @@
         if(!j.candidates || j.candidates.length===0){ out.textContent = 'No candidates found'; return }
         j.candidates.forEach(c=>{
           const d = document.createElement('div'); d.className='card';
-          d.innerHTML = `<strong>${c.name}</strong> <span class="small">${c.role} - ${c.seniority}</span><div class="small">Skills: ${c.skills.join(', ')}</div><div style="margin-top:6px"><a href="#" onclick="downloadCV('${c.filename.replace(/'/g, "\\'")}'); return false;">Download CV</a> <button onclick="deleteCV('${c.id}');">Delete</button></div>`;
+          d.innerHTML = `<strong>${c.name}</strong> <span class="small">${c.role} - ${c.seniority}</span><div class="small">Skills: ${c.skills.join(', ')}</div><div class="small">Referred by: ${c.referredBy || ''}</div><div style="margin-top:6px"><a href="#" onclick="downloadCV('${c.filename.replace(/'/g, "\\'") }'); return false;">Download CV</a> <button onclick="deleteCV('${c.id}');">Delete</button></div>`;
           out.appendChild(d);
         });
       }
@@ -243,11 +247,13 @@
   else { el('loginMsg').textContent = 'Invalid'; }
       });
 
-      // check auth by trying report endpoint
+      // show login by default, then check auth in background to avoid flash
+      showLogin(); updateAuthControls(false);
       (async ()=>{
-        const r = await fetch('/api/report', { credentials: 'include' });
-        if(r.ok){ hideLogin(); document.getElementById('mainUI').style.display='block'; updateAuthControls(true); loadList(); loadReport(); }
-        else { showLogin(); updateAuthControls(false); }
+        try{
+          const r = await fetch('/api/report', { credentials: 'include' });
+          if(r.ok){ hideLogin(); document.getElementById('mainUI').style.display='block'; updateAuthControls(true); loadList(); loadReport(); }
+        }catch(e){ /* ignore - remain on login */ }
       })();
     </script>
   </body>
