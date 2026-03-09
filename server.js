@@ -3,6 +3,7 @@ const multer = require('multer');
 const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const fs = require('fs');
+const { Readable } = require('stream');
 const cors = require('cors');
 
 const session = require('express-session');
@@ -129,30 +130,85 @@ app.get('/api/report', (req, res) => {
   res.json({ ok: true, total: db.candidates.length, byRole, bySeniority });
 });
 
+// Delete candidate and associated file (requires auth)
+app.delete('/api/candidates/:id', requireAuth, async (req, res) => {
+  const id = req.params.id;
+  const idx = db.candidates.findIndex(c => c.id === id);
+  if (idx === -1) return res.status(404).json({ error: 'not found' });
+  const candidate = db.candidates[idx];
+
+  // If stored in Supabase, try to remove
+  if (candidate.path && supabase){
+    try{
+      const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).remove([candidate.path]);
+      if(error){ console.error('supabase remove error', error); /* continue to remove metadata anyway */ }
+    }catch(err){ console.error('supabase remove exception', err); }
+  }
+
+  // If local fallback file exists, remove it
+  if (candidate.url && candidate.url.startsWith('/cv/')){
+    try{
+      const file = path.join(__dirname, 'data', 'uploads', candidate.filename);
+      if(fs.existsSync(file)) fs.unlinkSync(file);
+    }catch(err){ console.error('local file remove error', err); }
+  }
+
+  // remove metadata
+  db.candidates.splice(idx, 1);
+  saveDb();
+  res.json({ ok: true });
+});
+
 // Download CV file
-app.get('/cv/:filename', requireAuth, (req, res) => {
-  // try to find candidate by filename and redirect to stored URL
+app.get('/cv/:filename', requireAuth, async (req, res) => {
+  // try to find candidate by filename
   const candidate = db.candidates.find(c => c.filename === req.params.filename);
-  if(candidate && candidate.url){
-    // if stored in Supabase (path available), create signed URL
-    if(candidate.path && supabase){
-      const expires = parseInt(process.env.SIGNED_URL_EXPIRE || '300', 10);
-      supabase.storage.from(SUPABASE_BUCKET).createSignedUrl(candidate.path, expires)
-        .then(result => {
-          if(result.error) return res.status(500).send('failed to create signed url');
-          return res.redirect(result.signedURL);
-        }).catch(err => { console.error(err); res.status(500).send('error'); });
+  if(!candidate) return res.status(404).send('Not found');
+
+  // If Supabase path exists and client is configured -> generate signed URL
+  if(candidate.path && supabase){
+    const expires = parseInt(process.env.SIGNED_URL_EXPIRE || '300', 10);
+    try{
+      const result = await supabase.storage.from(SUPABASE_BUCKET).createSignedUrl(candidate.path, expires);
+      // Supabase v2 returns { data: { signedUrl }, error }
+      if(result.error){ console.error('signed url error', result.error); return res.status(500).send('failed to create signed url'); }
+      const signed = result.data && (result.data.signedUrl || result.data.signedurl || result.signedURL || result.signedUrl);
+      if(!signed){ console.error('signed url missing', result); return res.status(500).send('no signed url'); }
+
+      // Fetch the signed URL and stream it to the client so headers/content are preserved
+      const fetchRes = await fetch(signed);
+      if(!fetchRes.ok){ console.error('failed to fetch signed url', fetchRes.status); return res.status(500).send('failed to retrieve file'); }
+      const contentType = fetchRes.headers.get('content-type') || 'application/octet-stream';
+      const contentLength = fetchRes.headers.get('content-length');
+      res.setHeader('Content-Type', contentType);
+      if(contentLength) res.setHeader('Content-Length', contentLength);
+      // force download with original filename
+      res.setHeader('Content-Disposition', `attachment; filename="${candidate.filename.replace(/\"/g,'') }"`);
+      // pipe the response body (stream) to the client
+      // Node's global fetch may return a WHATWG ReadableStream; convert if needed
+      if (typeof fetchRes.body.pipe === 'function') {
+        fetchRes.body.pipe(res);
+      } else {
+        // convert Web ReadableStream to Node Readable and pipe
+        Readable.from(fetchRes.body).pipe(res);
+      }
       return;
-    }
-    // if url looks like a local path, serve it
-    if(candidate.url.startsWith('/cv/')){
-      const file = path.join(__dirname, 'data', 'uploads', req.params.filename);
-      if (!fs.existsSync(file)) return res.status(404).send('Not found');
-      return res.download(file);
-    }
+    }catch(err){ console.error('signed url exception', err); return res.status(500).send('error'); }
+  }
+
+  // If a local fallback URL exists (/cv/...), serve local file
+  if(candidate.url && candidate.url.startsWith('/cv/')){
+    const file = path.join(__dirname, 'data', 'uploads', req.params.filename);
+    if (!fs.existsSync(file)) return res.status(404).send('Not found');
+    return res.download(file);
+  }
+
+  // If an absolute url exists, redirect there
+  if(candidate.url){
     return res.redirect(candidate.url);
   }
-  // not found
+
+  // nothing available
   res.status(404).send('Not found');
 });
 

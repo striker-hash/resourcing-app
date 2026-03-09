@@ -111,7 +111,7 @@
         if(!j.candidates || j.candidates.length===0){ out.textContent = 'No candidates found'; return }
         j.candidates.forEach(c=>{
           const d = document.createElement('div'); d.className='card';
-          d.innerHTML = `<strong>${c.name}</strong> <span class="small">${c.role} - ${c.seniority}</span><div class="small">Skills: ${c.skills.join(', ')}</div><div style="margin-top:6px"><a href="/cv/${c.filename}" target="_blank">Download CV</a></div>`;
+          d.innerHTML = `<strong>${c.name}</strong> <span class="small">${c.role} - ${c.seniority}</span><div class="small">Skills: ${c.skills.join(', ')}</div><div style="margin-top:6px"><a href="#" onclick="downloadCV('${c.filename.replace(/'/g, "\\'")}'); return false;">Download CV</a> <button onclick="deleteCV('${c.id}');">Delete</button></div>`;
           out.appendChild(d);
         });
       }
@@ -121,6 +121,30 @@
         if(field === 'seniority') el('qSeniority').value = value;
         loadList();
       }
+
+        // Safe client-side download: fetch the file with credentials, check response, then save as blob.
+        async function downloadCV(filename){
+          try{
+            const resp = await fetch('/cv/'+encodeURIComponent(filename), { credentials: 'include' });
+            if(!resp.ok){
+              let msg = '';
+              try{ msg = await resp.text(); }catch(e){}
+              alert('Download failed: ' + (msg || resp.status));
+              return;
+            }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+          }catch(err){
+            alert('Download error: '+(err && err.message ? err.message : err));
+          }
+        }
 
       document.getElementById('clearFilters').addEventListener('click', e=>{
         el('qName').value=''; el('qRole').value=''; el('qSkill').value=''; el('qSeniority').value=''; loadList();
@@ -177,6 +201,15 @@
           data: { labels: senLabels, datasets: [{ data: senData, backgroundColor: ['#60a5fa','#93c5fd','#bfdbfe'] }] },
           options: { responsive:true, maintainAspectRatio:false, onClick: (evt, elems)=>{ if(elems.length){ const idx = elems[0].index; setFilter('seniority', senLabels[idx]); } } }
         });
+      }
+
+      async function deleteCV(id){
+        if(!confirm('Delete this candidate and their CV?')) return;
+        try{
+          const r = await fetch('/api/candidates/'+encodeURIComponent(id), { method: 'DELETE', credentials: 'include' });
+          if(!r.ok){ const t = await r.text(); alert('Delete failed: '+t); return; }
+          alert('Deleted'); loadList(); loadReport();
+        }catch(err){ alert('Delete error: '+err.message); }
       }
 
       document.getElementById('btnFilter').addEventListener('click', e=>{ e.preventDefault(); loadList(); });
