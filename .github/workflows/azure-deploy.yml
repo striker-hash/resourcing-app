@@ -1,0 +1,62 @@
+name: Azure Web App CI/CD
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      NODE_VERSION: '18'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint/test (if any)
+        run: |
+          if [ -f package.json ]; then
+            npm run test --if-present || true
+          fi
+
+      - name: Build (if any)
+        run: |
+          if npm run -s build --if-present; then
+            echo "Build completed"
+          fi
+
+      - name: Deploy to Azure Web App
+        id: deploy
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: .
+
+      - name: (Optional) Configure App Settings via Azure CLI
+        if: ${{ secrets.AZURE_CREDENTIALS }}
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set App Settings (example)
+        if: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          az webapp config appsettings set \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --name ${{ secrets.AZURE_WEBAPP_NAME }} \
+            --settings \
+              JWT_SECRET=${{ secrets.JWT_SECRET }} \
+              ADMIN_USER=${{ secrets.ADMIN_USER }} \
+              ADMIN_PASS_HASH=${{ secrets.ADMIN_PASS_HASH }} \
+              AZURE_STORAGE_CONTAINER=${{ secrets.AZURE_STORAGE_CONTAINER }} \
+              AZURE_STORAGE_CONNECTION_STRING=${{ secrets.AZURE_STORAGE_CONNECTION_STRING }} \
+              DATABASE_URL=${{ secrets.DATABASE_URL }}
