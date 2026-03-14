@@ -153,12 +153,30 @@ app.post('/api/upload', authRequired, upload.single('cv'), async (req, res) => {
 
 // list
 app.get('/api/candidates', authRequired, async (req, res) => {
+  const { name, role, skill, seniority, referredBy } = req.query;
   if (pg) {
-    const q = 'SELECT * FROM candidates ORDER BY uploaded_at DESC';
-    try { const r = await pg.query(q); return res.json({ ok: true, candidates: r.rows }); } catch (e) { console.error('pg select', e.message); return res.status(500).json({ error: 'db' }); }
+    const conditions = [];
+    const values = [];
+    if (name) { values.push(`%${name}%`); conditions.push(`name ILIKE $${values.length}`); }
+    if (role) { values.push(`%${role}%`); conditions.push(`role ILIKE $${values.length}`); }
+    if (seniority) { values.push(seniority); conditions.push(`seniority = $${values.length}`); }
+    if (referredBy) { values.push(`%${referredBy}%`); conditions.push(`referredby ILIKE $${values.length}`); }
+    if (skill) { values.push(`%${skill}%`); conditions.push(`array_to_string(skills, ',') ILIKE $${values.length}`); }
+    const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+    const q = `SELECT * FROM candidates ${where} ORDER BY uploaded_at DESC`;
+    try { const r = await pg.query(q, values); return res.json({ ok: true, candidates: r.rows }); } catch (e) { console.error('pg select', e.message); return res.status(500).json({ error: 'db' }); }
   }
   const DB_FILE = path.join(__dirname, 'data', 'db.json');
-  try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); return res.json({ ok: true, candidates: (current.candidates || []).reverse() }); } catch (e) { return res.json({ ok: true, candidates: [] }); }
+  try {
+    const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    let candidates = (current.candidates || []).slice().reverse();
+    if (name) candidates = candidates.filter(c => c.name.toLowerCase().includes(name.toLowerCase()));
+    if (role) candidates = candidates.filter(c => c.role.toLowerCase().includes(role.toLowerCase()));
+    if (seniority) candidates = candidates.filter(c => c.seniority === seniority);
+    if (referredBy) candidates = candidates.filter(c => (c.referredby || '').toLowerCase().includes(referredBy.toLowerCase()));
+    if (skill) candidates = candidates.filter(c => c.skills.some(s => s.toLowerCase().includes(skill.toLowerCase())));
+    return res.json({ ok: true, candidates });
+  } catch (e) { return res.json({ ok: true, candidates: [] }); }
 });
 
 // download

@@ -172,7 +172,8 @@
       let roleChart = null;
       let seniorityChart = null;
       async function loadReport(){
-        const r = await fetch('/api/report', { credentials: 'include' });
+        const token = localStorage.getItem('token');
+        const r = await fetch('/api/report', { headers: token ? { 'Authorization': 'Bearer '+token } : undefined });
         const j = await r.json();
         const elr = document.getElementById('report');
         elr.innerHTML = '';
