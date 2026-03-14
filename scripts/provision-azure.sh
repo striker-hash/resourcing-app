@@ -76,11 +76,18 @@ az appservice plan create \
 
 # 5. Web App
 echo "[5/7] Creating Web App..."
+# Detect correct runtime string for this CLI version
+NODE_RUNTIME=$(az webapp list-runtimes --os-type linux --query "[?contains(@, 'NODE|20') || contains(@, 'NODE:20')]" -o tsv 2>/dev/null | head -1 || echo "")
+if echo "$NODE_RUNTIME" | grep -q "NODE:20"; then
+  RUNTIME="NODE:20-lts"
+else
+  RUNTIME="NODE|20-LTS"
+fi
 az webapp create \
   --name "$WEBAPP_NAME" \
   --resource-group "$RG" \
   --plan "$PLAN_NAME" \
-  --runtime "NODE:18-lts" \
+  --runtime "$RUNTIME" \
   --output none
 
 echo "    Web App: $WEBAPP_NAME"
