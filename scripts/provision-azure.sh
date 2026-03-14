@@ -33,7 +33,20 @@ AZ_CONN=$(az storage account show-connection-string -n "$STORAGE" -g "$RG" --que
 az storage container create --name cvs --account-name "$STORAGE" --connection-string "$AZ_CONN" || true
 
 echo "Creating Azure Database for PostgreSQL Flexible Server $PG"
-az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name Standard_B1ms --version 13 --storage-size 32
+# Use Burstable tier with a small SKU if available; some regions may not support B-series — fall back to a supported SKU if creation fails
+PG_SKU="Standard_B1ms"
+PG_TIER="Burstable"
+set +e
+az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_SKU --tier $PG_TIER --version 13 --storage-size 32
+RC=$?
+set -e
+if [ $RC -ne 0 ]; then
+  echo "Default SKU $PG_SKU not available in $LOCATION. Listing a few available SKUs for the GeneralPurpose tier..."
+  az postgres flexible-server list-skus -l "$LOCATION" --query "[?contains(tier, 'GeneralPurpose')].[name]" -o table || true
+  read -p "Enter an alternate sku-name from the list above (e.g. standard_d2s_v3): " PG_SKU
+  echo "Attempting creation with sku $PG_SKU (GeneralPurpose tier)..."
+  az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_SKU --version 13 --storage-size 32
+fi
 
 echo "Create a firewall rule to allow public access from Azure services (you may want to restrict)"
 az postgres flexible-server firewall-rule create -g "$RG" -s "$PG" -n allow_az --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
