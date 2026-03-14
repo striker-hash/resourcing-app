@@ -58,7 +58,7 @@ if [ $RC -ne 0 ]; then
 fi
 
 echo "Create a firewall rule to allow public access from Azure services (you may want to restrict)"
-az postgres flexible-server firewall-rule create -g "$RG" -s "$PG" -n allow_az --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
+az postgres flexible-server firewall-rule create -g "$RG" --name "$PG" --rule-name allow_az --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
 
 PG_HOST=$(az postgres flexible-server show -g "$RG" -n "$PG" --query fullyQualifiedDomainName -o tsv)
 DATABASE_URL="postgresql://$PG_ADMIN:$PG_PASS@$PG_HOST:5432/postgres"
