@@ -64,6 +64,17 @@ If you set the Supabase bucket to Private (recommended for CVs), the app will no
 Environment variable:
 - `SIGNED_URL_EXPIRE` — signed URL expiry in seconds (default 300)
 
+Azure deployment (recommended for persistence)
+
+This repository includes a GitHub Actions workflow to deploy the app to Azure using:
+- Azure Blob Storage (for CVs)
+- Azure Database for PostgreSQL (for metadata)
+- Azure App Service (Node.js web app)
+
+No local Azure CLI required. All provisioning is done via **Azure Cloud Shell** (browser terminal in the Azure Portal). See [AZURE-DEPLOY.md](AZURE-DEPLOY.md) for the complete step-by-step guide.
+
+GitHub Actions needs only two secrets: `AZURE_WEBAPP_NAME` and `AZURE_WEBAPP_PUBLISH_PROFILE`. Push to `main` to trigger a deploy automatically.
+
 Deploy to Render (step-by-step)
 
 1. Push repo to GitHub (already done).

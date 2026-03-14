@@ -3,7 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
-const { BlobServiceClient } = require('@azure/storage-blob');
+const { BlobServiceClient, BlobSASPermissions } = require('@azure/storage-blob');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -176,7 +176,12 @@ app.get('/cv/:filename', authRequired, async (req, res) => {
   if (blobContainer) {
     try {
       const blob = blobContainer.getBlobClient(entry.path);
-      const sasUrl = blob.url; // container is private ideally; for simplicity returning direct blob url (requires container public) - in prod generate SAS
+      const expiry = new Date();
+      expiry.setSeconds(expiry.getSeconds() + (parseInt(process.env.SIGNED_URL_EXPIRE) || 300));
+      const sasUrl = await blob.generateSasUrl({
+        permissions: BlobSASPermissions.parse('r'),
+        expiresOn: expiry,
+      });
       return res.redirect(sasUrl);
     } catch (e) { console.error('azure get', e.message); return res.status(500).send('error'); }
   }
