@@ -81,11 +81,12 @@
         });
       }
 
-      document.getElementById('uploadForm').addEventListener('submit', async e=>{
+    document.getElementById('uploadForm').addEventListener('submit', async e=>{
         e.preventDefault();
         const f = new FormData(e.target);
   el('uploadMsg').textContent = 'Uploading...';
-  const r = await fetch('/api/upload', { method:'POST', body: f, credentials: 'include' });
+  const token = localStorage.getItem('token');
+  const r = await fetch('/api/upload', { method:'POST', body: f, headers: token ? { 'Authorization': 'Bearer '+token } : undefined });
         const j = await r.json();
         if(j.ok){ el('uploadMsg').textContent = 'Uploaded'; loadList(); loadReport(); e.target.reset(); }
         else el('uploadMsg').textContent = j.error || 'Error';
@@ -108,7 +109,8 @@
         if(qSkill) params.set('skill', qSkill);
         if(qSen) params.set('seniority', qSen);
   if(qRef) params.set('referredBy', qRef);
-  const res = await fetch('/api/candidates?'+params.toString(), { credentials: 'include' });
+  const token = localStorage.getItem('token');
+  const res = await fetch('/api/candidates?'+params.toString(), { headers: token ? { 'Authorization': 'Bearer '+token } : undefined });
         const j = await res.json();
         const out = document.getElementById('candidates');
         out.innerHTML = '';
@@ -129,7 +131,8 @@
         // Safe client-side download: fetch the file with credentials, check response, then save as blob.
         async function downloadCV(filename){
           try{
-            const resp = await fetch('/cv/'+encodeURIComponent(filename), { credentials: 'include' });
+            const token = localStorage.getItem('token');
+            const resp = await fetch('/cv/'+encodeURIComponent(filename), { headers: token ? { 'Authorization': 'Bearer '+token } : undefined });
             if(!resp.ok){
               let msg = '';
               try{ msg = await resp.text(); }catch(e){}
@@ -207,10 +210,11 @@
         });
       }
 
-      async function deleteCV(id){
+        async function deleteCV(id){
         if(!confirm('Delete this candidate and their CV?')) return;
         try{
-          const r = await fetch('/api/candidates/'+encodeURIComponent(id), { method: 'DELETE', credentials: 'include' });
+          const token = localStorage.getItem('token');
+          const r = await fetch('/api/candidates/'+encodeURIComponent(id), { method: 'DELETE', headers: token ? { 'Authorization': 'Bearer '+token } : undefined });
           if(!r.ok){ const t = await r.text(); alert('Delete failed: '+t); return; }
           alert('Deleted'); loadList(); loadReport();
         }catch(err){ alert('Delete error: '+err.message); }
@@ -223,7 +227,7 @@
       function hideLogin(){ el('loginCard').style.display='none'; }
 
       async function doLogout(){
-        await fetch('/api/logout', { method:'POST', credentials: 'include' });
+        localStorage.removeItem('token');
         hideLogin(); document.getElementById('mainUI').style.display='none'; updateAuthControls(false);
       }
 
@@ -237,13 +241,14 @@
         }
       }
 
-      document.getElementById('loginForm').addEventListener('submit', async e=>{
+  document.getElementById('loginForm').addEventListener('submit', async e=>{
         e.preventDefault();
         const fd = new FormData(e.target);
         const body = { username: fd.get('username'), password: fd.get('password') };
         el('loginMsg').textContent = 'Signing in...';
-        const r = await fetch('/api/login', { method:'POST', headers: { 'content-type':'application/json' }, body: JSON.stringify(body), credentials: 'include' });
-  if(r.ok){ el('loginMsg').textContent = 'OK'; hideLogin(); document.getElementById('mainUI').style.display='block'; updateAuthControls(true); loadList(); loadReport(); }
+    const r = await fetch('/api/login', { method:'POST', headers: { 'content-type':'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if(r.ok && j.token){ localStorage.setItem('token', j.token); el('loginMsg').textContent = 'OK'; hideLogin(); document.getElementById('mainUI').style.display='block'; updateAuthControls(true); loadList(); loadReport(); }
   else { el('loginMsg').textContent = 'Invalid'; }
       });
 
@@ -251,7 +256,8 @@
       showLogin(); updateAuthControls(false);
       (async ()=>{
         try{
-          const r = await fetch('/api/report', { credentials: 'include' });
+          const token = localStorage.getItem('token');
+          const r = await fetch('/api/report', { headers: token ? { 'Authorization': 'Bearer '+token } : undefined });
           if(r.ok){ hideLogin(); document.getElementById('mainUI').style.display='block'; updateAuthControls(true); loadList(); loadReport(); }
         }catch(e){ /* ignore - remain on login */ }
       })();

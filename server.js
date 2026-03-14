@@ -1,261 +1,212 @@
 const express = require('express');
 const multer = require('multer');
-const { createClient } = require('@supabase/supabase-js');
 const path = require('path');
 const fs = require('fs');
-const { Readable } = require('stream');
 const cors = require('cors');
-
-const session = require('express-session');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+// Config from env
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'change-me';
+const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+const ADMIN_PASS_HASH = process.env.ADMIN_PASS_HASH; // bcrypt hash
+
+// Azure Blob
+const AZURE_CONN = process.env.AZURE_STORAGE_CONNECTION_STRING;
+const AZURE_CONTAINER = process.env.AZURE_STORAGE_CONTAINER || 'cvs';
+let blobContainer = null;
+if (AZURE_CONN) {
+  const blobSvc = BlobServiceClient.fromConnectionString(AZURE_CONN);
+  blobContainer = blobSvc.getContainerClient(AZURE_CONTAINER);
+  (async () => {
+    try {
+      await blobContainer.createIfNotExists();
+      console.log('Azure container ready');
+    } catch (e) {
+      console.error('azure container init', e.message);
+    }
+  })();
+}
+
+// Postgres
+const DATABASE_URL = process.env.DATABASE_URL;
+let pg = null;
+if (DATABASE_URL) {
+  pg = new Pool({ connectionString: DATABASE_URL });
+  (async () => {
+    const create = `CREATE TABLE IF NOT EXISTS candidates (
+      id text PRIMARY KEY,
+      name text,
+      role text,
+      skills text[],
+      seniority text,
+      referredby text,
+      filename text,
+      path text,
+      uploaded_at timestamptz
+    );`;
+    try {
+      await pg.query(create);
+      console.log('Postgres ready');
+    } catch (e) {
+      console.error('pg init', e.message);
+    }
+  })();
+}
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Simple session-based auth (single role)
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'change-me',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { maxAge: 24 * 60 * 60 * 1000 }
-}));
-
-function requireAuth(req, res, next){
-  if(req.session && req.session.user) return next();
-  return res.status(401).json({ error: 'unauthenticated' });
-}
-
-// Supabase client (expects SUPABASE_URL and SUPABASE_KEY env vars)
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'cvs';
-let supabase = null;
-if(SUPABASE_URL && SUPABASE_KEY){
-  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-}
-
-// Multer config: use memory storage and stream to Supabase
-const storage = multer.memoryStorage();
-const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
-
-// In-memory "database" of candidates (persisted to disk in JSON file)
-const DB_FILE = path.join(__dirname, 'data', 'db.json');
-let db = { candidates: [] };
-function loadDb() {
-  try {
-    const raw = fs.readFileSync(DB_FILE, 'utf8');
-    db = JSON.parse(raw);
-  } catch (e) {
-    db = { candidates: [] };
-    saveDb();
-  }
-}
-function saveDb() {
-  fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-}
-loadDb();
-
-// Serve root: if user is authenticated, serve the SPA; otherwise serve a login-only page
-app.get('/', (req, res) => {
-  if (req.session && req.session.user) {
-    return res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  }
-  return res.sendFile(path.join(__dirname, 'public', 'login-only.html'));
-});
-
-// Serve static frontend assets
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Upload endpoint: metadata fields: name, role, skills (comma separated), seniority
-app.post('/api/upload', requireAuth, upload.single('cv'), async (req, res) => {
-  const { name, role, skills, seniority } = req.body;
-  if (!req.file) return res.status(400).json({ error: 'CV file is required (form field cv)' });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
-  // create a safe filename
+function authRequired(req, res, next) {
+  const a = req.headers.authorization;
+  if (!a) return res.status(401).json({ error: 'missing token' });
+  const parts = a.split(' ');
+  if (parts.length !== 2) return res.status(401).json({ error: 'bad token' });
+  try {
+    const payload = jwt.verify(parts[1], JWT_SECRET);
+    req.user = payload;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: 'invalid token' });
+  }
+}
+
+// auth
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).json({ error: 'username & password required' });
+  if (username !== ADMIN_USER) return res.status(401).json({ error: 'invalid credentials' });
+  if (!ADMIN_PASS_HASH) return res.status(500).json({ error: 'admin password not configured' });
+  const ok = bcrypt.compareSync(password, ADMIN_PASS_HASH);
+  if (!ok) return res.status(401).json({ error: 'invalid credentials' });
+  const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '12h' });
+  res.json({ ok: true, token });
+});
+
+// upload
+app.post('/api/upload', authRequired, upload.single('cv'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'file required' });
+  const { name, role, skills, seniority, referredBy } = req.body;
   const ts = Date.now();
-  const safe = req.file.originalname.replace(/[^a-zA-Z0-9.\-_/ ]/g, '_');
+  const safe = req.file.originalname.replace(/[^a-zA-Z0-9.\.-_ ]/g, '_');
   const filename = `${ts}_${safe}`;
 
-  let storedPath = null;
-  let publicUrl = null;
-  if(supabase){
-    try{
-      // upload to supabase storage
-      const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).upload(filename, req.file.buffer, { cacheControl: '3600', upsert: false });
-      if(error) throw error;
-      // store the object path (we will generate signed URLs on download)
-      storedPath = data.path;
-    }catch(err){
-      console.error('Supabase upload error', err.message || err);
-      return res.status(500).json({ error: 'failed to upload to storage' });
+  let pathInStorage = null;
+  if (blobContainer) {
+    try {
+      const block = blobContainer.getBlockBlobClient(filename);
+      await block.uploadData(req.file.buffer, { blobHTTPHeaders: { blobContentType: req.file.mimetype } });
+      pathInStorage = filename;
+    } catch (e) {
+      console.error('azure upload', e.message);
+      return res.status(500).json({ error: 'upload failed' });
     }
   } else {
-    // fallback: write to local uploads dir
+    // local fallback (for development)
     const UPLOAD_DIR = path.join(__dirname, 'data', 'uploads');
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-    const outPath = path.join(UPLOAD_DIR, filename);
-    fs.writeFileSync(outPath, req.file.buffer);
-  publicUrl = `/cv/${filename}`; // local download endpoint still works
+    fs.writeFileSync(path.join(UPLOAD_DIR, filename), req.file.buffer);
+    pathInStorage = filename;
   }
 
   const candidate = {
-    id: Date.now().toString(36),
+    id: ts.toString(36),
     name: name || 'Unknown',
     role: role || '',
     skills: (skills || '').split(',').map(s => s.trim()).filter(Boolean),
     seniority: seniority || '',
-    referredBy: req.body.referredBy || '',
-  filename,
-  path: storedPath,
-  url: publicUrl,
-    uploadedAt: new Date().toISOString()
+    referredby: referredBy || '',
+    filename,
+    path: pathInStorage,
+    uploaded_at: new Date().toISOString()
   };
-  db.candidates.push(candidate);
-  saveDb();
+
+  if (pg) {
+    const sql = `INSERT INTO candidates(id,name,role,skills,seniority,referredby,filename,path,uploaded_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`;
+    try {
+      await pg.query(sql, [candidate.id, candidate.name, candidate.role, candidate.skills, candidate.seniority, candidate.referredby, candidate.filename, candidate.path, candidate.uploaded_at]);
+    } catch (e) {
+      console.error('pg insert', e.message);
+      return res.status(500).json({ error: 'db error' });
+    }
+  } else {
+    // local JSON fallback
+    const DB_FILE = path.join(__dirname, 'data', 'db.json');
+    let current = { candidates: [] };
+    try { current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) { }
+    current.candidates = current.candidates || [];
+    current.candidates.push(candidate);
+    fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+    fs.writeFileSync(DB_FILE, JSON.stringify(current, null, 2));
+  }
+
   res.json({ ok: true, candidate });
 });
 
-// List candidates with optional filters: role, skill, seniority, name
-app.get('/api/candidates', requireAuth, (req, res) => {
-  const { role, skill, seniority, name, referredBy } = req.query;
-  let list = db.candidates.slice().reverse(); // newest first
-  if (role) list = list.filter(c => c.role.toLowerCase().includes(role.toLowerCase()));
-  if (seniority) list = list.filter(c => c.seniority.toLowerCase().includes(seniority.toLowerCase()));
-  if (name) list = list.filter(c => c.name.toLowerCase().includes(name.toLowerCase()));
-  if (skill) list = list.filter(c => c.skills.map(s => s.toLowerCase()).includes(skill.toLowerCase()));
-  if (referredBy) list = list.filter(c => (c.referredBy || '').toLowerCase().includes(referredBy.toLowerCase()));
-  res.json({ ok: true, candidates: list });
+// list
+app.get('/api/candidates', authRequired, async (req, res) => {
+  if (pg) {
+    const q = 'SELECT * FROM candidates ORDER BY uploaded_at DESC';
+    try { const r = await pg.query(q); return res.json({ ok: true, candidates: r.rows }); } catch (e) { console.error('pg select', e.message); return res.status(500).json({ error: 'db' }); }
+  }
+  const DB_FILE = path.join(__dirname, 'data', 'db.json');
+  try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); return res.json({ ok: true, candidates: (current.candidates || []).reverse() }); } catch (e) { return res.json({ ok: true, candidates: [] }); }
 });
 
-// Simple reporting: counts by role and by seniority
-app.get('/api/report', requireAuth, (req, res) => {
-  const byRole = {};
-  const bySeniority = {};
-  db.candidates.forEach(c => {
-    byRole[c.role] = (byRole[c.role] || 0) + 1;
-    bySeniority[c.seniority] = (bySeniority[c.seniority] || 0) + 1;
-  });
-  res.json({ ok: true, total: db.candidates.length, byRole, bySeniority });
+// download
+app.get('/cv/:filename', authRequired, async (req, res) => {
+  const filename = req.params.filename;
+  // find entry
+  let entry = null;
+  if (pg) {
+    try { const r = await pg.query('SELECT * FROM candidates WHERE filename=$1', [filename]); if (r.rows.length) entry = r.rows[0]; } catch (e) { console.error('pg find', e.message); }
+  } else {
+    try { const current = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'db.json'), 'utf8')); entry = (current.candidates || []).find(c => c.filename === filename); } catch (e) { }
+  }
+  if (!entry) return res.status(404).send('Not found');
+
+  if (blobContainer) {
+    try {
+      const blob = blobContainer.getBlobClient(entry.path);
+      const sasUrl = blob.url; // container is private ideally; for simplicity returning direct blob url (requires container public) - in prod generate SAS
+      return res.redirect(sasUrl);
+    } catch (e) { console.error('azure get', e.message); return res.status(500).send('error'); }
+  }
+  // local fallback
+  const file = path.join(__dirname, 'data', 'uploads', filename);
+  if (!fs.existsSync(file)) return res.status(404).send('Not found');
+  return res.download(file);
 });
 
-// Delete candidate and associated file (requires auth)
-app.delete('/api/candidates/:id', requireAuth, async (req, res) => {
+// delete
+app.delete('/api/candidates/:id', authRequired, async (req, res) => {
   const id = req.params.id;
-  const idx = db.candidates.findIndex(c => c.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'not found' });
-  const candidate = db.candidates[idx];
-
-  // If stored in Supabase, try to remove
-  if (candidate.path && supabase){
-    try{
-      const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).remove([candidate.path]);
-      if(error){ console.error('supabase remove error', error); /* continue to remove metadata anyway */ }
-    }catch(err){ console.error('supabase remove exception', err); }
+  if (pg) {
+    try { await pg.query('DELETE FROM candidates WHERE id=$1', [id]); return res.json({ ok: true }); } catch (e) { console.error('pg del', e.message); return res.status(500).json({ error: 'db' }); }
   }
-
-  // If local fallback file exists, remove it
-  if (candidate.url && candidate.url.startsWith('/cv/')){
-    try{
-      const file = path.join(__dirname, 'data', 'uploads', candidate.filename);
-      if(fs.existsSync(file)) fs.unlinkSync(file);
-    }catch(err){ console.error('local file remove error', err); }
-  }
-
-  // remove metadata
-  db.candidates.splice(idx, 1);
-  saveDb();
-  res.json({ ok: true });
+  const DB_FILE = path.join(__dirname, 'data', 'db.json');
+  try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); current.candidates = (current.candidates || []).filter(c => c.id !== id); fs.writeFileSync(DB_FILE, JSON.stringify(current, null, 2)); return res.json({ ok: true }); } catch (e) { return res.status(500).json({ error: 'err' }); }
 });
 
-// Download CV file
-app.get('/cv/:filename', requireAuth, async (req, res) => {
-  // try to find candidate by filename
-  const candidate = db.candidates.find(c => c.filename === req.params.filename);
-  if(!candidate) return res.status(404).send('Not found');
-
-  // If Supabase path exists and client is configured -> generate signed URL
-  if(candidate.path && supabase){
-    const expires = parseInt(process.env.SIGNED_URL_EXPIRE || '300', 10);
-    try{
-      const result = await supabase.storage.from(SUPABASE_BUCKET).createSignedUrl(candidate.path, expires);
-      // Supabase v2 returns { data: { signedUrl }, error }
-      if(result.error){ console.error('signed url error', result.error); return res.status(500).send('failed to create signed url'); }
-      const signed = result.data && (result.data.signedUrl || result.data.signedurl || result.signedURL || result.signedUrl);
-      if(!signed){ console.error('signed url missing', result); return res.status(500).send('no signed url'); }
-
-      // Fetch the signed URL and stream it to the client so headers/content are preserved
-      const fetchRes = await fetch(signed);
-      if(!fetchRes.ok){ console.error('failed to fetch signed url', fetchRes.status); return res.status(500).send('failed to retrieve file'); }
-      const contentType = fetchRes.headers.get('content-type') || 'application/octet-stream';
-      const contentLength = fetchRes.headers.get('content-length');
-      res.setHeader('Content-Type', contentType);
-      if(contentLength) res.setHeader('Content-Length', contentLength);
-      // force download with original filename
-      res.setHeader('Content-Disposition', `attachment; filename="${candidate.filename.replace(/\"/g,'') }"`);
-      // pipe the response body (stream) to the client
-      // Node's global fetch may return a WHATWG ReadableStream; convert if needed
-      if (typeof fetchRes.body.pipe === 'function') {
-        fetchRes.body.pipe(res);
-      } else {
-        // convert Web ReadableStream to Node Readable and pipe
-        Readable.from(fetchRes.body).pipe(res);
-      }
-      return;
-    }catch(err){ console.error('signed url exception', err); return res.status(500).send('error'); }
+// report
+app.get('/api/report', authRequired, async (req, res) => {
+  if (pg) {
+    try { const r = await pg.query('SELECT role, seniority, COUNT(*) as cnt FROM candidates GROUP BY role, seniority');
+      const byRole = {}; const bySeniority = {}; let total = 0;
+      r.rows.forEach(row => { byRole[row.role] = (byRole[row.role] || 0) + parseInt(row.cnt); bySeniority[row.seniority] = (bySeniority[row.seniority] || 0) + parseInt(row.cnt); total += parseInt(row.cnt); });
+      return res.json({ ok: true, total, byRole, bySeniority });
+    } catch (e) { console.error('pg report', e.message); return res.status(500).json({ error: 'db' }); }
   }
-
-  // If a local fallback URL exists (/cv/...), serve local file
-  if(candidate.url && candidate.url.startsWith('/cv/')){
-    const file = path.join(__dirname, 'data', 'uploads', req.params.filename);
-    if (!fs.existsSync(file)) return res.status(404).send('Not found');
-    return res.download(file);
-  }
-
-  // If an absolute url exists, redirect there
-  if(candidate.url){
-    return res.redirect(candidate.url);
-  }
-
-  // nothing available
-  res.status(404).send('Not found');
+  const DB_FILE = path.join(__dirname, 'data', 'db.json');
+  try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); const byRole = {}; const bySeniority = {}; (current.candidates || []).forEach(c => { byRole[c.role] = (byRole[c.role] || 0) + 1; bySeniority[c.seniority] = (bySeniority[c.seniority] || 0) + 1; }); return res.json({ ok: true, total: (current.candidates || []).length, byRole, bySeniority }); } catch (e) { return res.json({ ok: true, total: 0, byRole: {}, bySeniority: {} }); }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server listening on http://localhost:${PORT}`));
-
-// Auth endpoints
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body || {};
-  const ADMIN_USER = process.env.ADMIN_USER || 'admin';
-  const ADMIN_PASS_HASH = process.env.ADMIN_PASS_HASH; // prefer hashed password
-  const ADMIN_PASS_PLAIN = process.env.ADMIN_PASS; // fallback
-
-  if(!username || !password) return res.status(400).json({ error: 'username & password required' });
-  if(username !== ADMIN_USER) return res.status(401).json({ error: 'invalid credentials' });
-
-  if(ADMIN_PASS_HASH){
-    // compare bcrypt
-    const ok = bcrypt.compareSync(password, ADMIN_PASS_HASH);
-    if(ok){ req.session.user = { username }; return res.json({ ok: true }); }
-    return res.status(401).json({ error: 'invalid credentials' });
-  }
-
-  // fallback to plain-text env var (not recommended)
-  if(ADMIN_PASS_PLAIN && password === ADMIN_PASS_PLAIN){ req.session.user = { username }; return res.json({ ok: true }); }
-  return res.status(401).json({ error: 'invalid credentials' });
-});
-
-app.post('/api/logout', (req, res) => {
-  req.session.destroy(err => { if(err) return res.status(500).json({ error: 'failed' }); res.json({ ok:true }); });
-});
-
-// Explicit logout route (GET) for browsers: destroy session, clear cookie and redirect to root
-app.get('/logout', (req, res) => {
-  req.session.destroy(err => {
-    // clear cookie
-    res.clearCookie('connect.sid');
-    return res.redirect('/');
-  });
-});
+app.listen(PORT, () => console.log('Server listening on', PORT));
