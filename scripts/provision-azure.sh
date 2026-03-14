@@ -33,19 +33,28 @@ AZ_CONN=$(az storage account show-connection-string -n "$STORAGE" -g "$RG" --que
 az storage container create --name cvs --account-name "$STORAGE" --connection-string "$AZ_CONN" || true
 
 echo "Creating Azure Database for PostgreSQL Flexible Server $PG"
-# Use Burstable tier with a small SKU if available; some regions may not support B-series — fall back to a supported SKU if creation fails
-PG_SKU="Standard_B1ms"
-PG_TIER="Burstable"
+# Prefer a small Burstable SKU, but fall back to a safe GeneralPurpose SKU automatically (reduces interactive failures).
+PG_BURST_SKU="Standard_B1ms"
+PG_FALLBACK_SKU="standard_d2s_v3"
+
 set +e
-az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_SKU --tier $PG_TIER --version 13 --storage-size 32
+echo "Trying Burstable SKU: $PG_BURST_SKU (may not be available in all regions)"
+az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_BURST_SKU --tier Burstable --version 13 --storage-size 32
 RC=$?
 set -e
 if [ $RC -ne 0 ]; then
-  echo "Default SKU $PG_SKU not available in $LOCATION. Listing a few available SKUs for the GeneralPurpose tier..."
-  az postgres flexible-server list-skus -l "$LOCATION" --query "[?contains(tier, 'GeneralPurpose')].[name]" -o table || true
-  read -p "Enter an alternate sku-name from the list above (e.g. standard_d2s_v3): " PG_SKU
-  echo "Attempting creation with sku $PG_SKU (GeneralPurpose tier)..."
-  az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_SKU --tier GeneralPurpose --version 13 --storage-size 32
+  echo "Default Burstable SKU $PG_BURST_SKU not available in $LOCATION. Attempting fallback GeneralPurpose SKU: $PG_FALLBACK_SKU"
+  set +e
+  az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_FALLBACK_SKU --tier GeneralPurpose --version 13 --storage-size 32
+  RC2=$?
+  set -e
+  if [ $RC2 -ne 0 ]; then
+    echo "Fallback SKU $PG_FALLBACK_SKU also failed in $LOCATION. Listing available SKUs for the location:" 
+    az postgres flexible-server list-skus -l "$LOCATION" -o table || true
+    read -p "Enter an alternate sku-name from the list above (e.g. standard_d2s_v3): " PG_SKU
+    echo "Attempting creation with sku $PG_SKU (GeneralPurpose tier)..."
+    az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name "$PG_SKU" --tier GeneralPurpose --version 13 --storage-size 32
+  fi
 fi
 
 echo "Create a firewall rule to allow public access from Azure services (you may want to restrict)"
