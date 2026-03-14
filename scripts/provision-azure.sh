@@ -1,86 +1,138 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Minimal-cost Azure provisioning script (interactive values below)
-# WARNING: This script uses az CLI and will create billable resources.
+# ─── EDIT THESE THREE LINES ───────────────────────────────────────────────────
+LOCATION="eastus"          # Azure region: eastus, westeurope, uksouth, etc.
+PG_PASS="Change_Me_123!"   # PostgreSQL password (min 8 chars, uppercase + lowercase + special)
+ADMIN_PASS="MyAppPass1!"   # Login password for the resourcing web app
+# ──────────────────────────────────────────────────────────────────────────────
 
-if ! command -v az >/dev/null 2>&1; then
-  echo "az CLI is required. Install from https://learn.microsoft.com/cli/azure/install-azure-cli"
-  exit 1
+SUFFIX=$(openssl rand -hex 3)
+RG="resourcing-rg"
+STORAGE_NAME="resourcingcvs${SUFFIX}"
+PG_SERVER="resourcing-pg-${SUFFIX}"
+PG_ADMIN="pgadmin"
+WEBAPP_NAME="resourcing-app-${SUFFIX}"
+PLAN_NAME="resourcing-plan"
+
+echo ""
+echo "=== Starting Azure provisioning ==="
+echo "Suffix: $SUFFIX | Region: $LOCATION"
+echo ""
+
+# 1. Resource Group
+echo "[1/7] Creating resource group..."
+az group create --name "$RG" --location "$LOCATION" --output none
+
+# 2. Storage Account
+echo "[2/7] Creating storage account..."
+az storage account create \
+  --name "$STORAGE_NAME" \
+  --resource-group "$RG" \
+  --location "$LOCATION" \
+  --sku Standard_LRS \
+  --kind StorageV2 \
+  --output none
+
+STORAGE_CONN=$(az storage account show-connection-string \
+  --name "$STORAGE_NAME" \
+  --resource-group "$RG" \
+  --query connectionString -o tsv)
+
+az storage container create \
+  --name cvs \
+  --connection-string "$STORAGE_CONN" \
+  --output none
+
+echo "    Storage account: $STORAGE_NAME"
+
+# 3. PostgreSQL Flexible Server
+echo "[3/7] Creating PostgreSQL server (this takes ~3 minutes)..."
+az postgres flexible-server create \
+  --resource-group "$RG" \
+  --name "$PG_SERVER" \
+  --location "$LOCATION" \
+  --admin-user "$PG_ADMIN" \
+  --admin-password "$PG_PASS" \
+  --sku-name Standard_B1ms \
+  --tier Burstable \
+  --version 15 \
+  --storage-size 32 \
+  --public-access 0.0.0.0 \
+  --output none
+
+DATABASE_URL="postgresql://${PG_ADMIN}:${PG_PASS}@${PG_SERVER}.postgres.database.azure.com:5432/postgres?sslmode=require"
+echo "    PostgreSQL server: $PG_SERVER"
+
+# 4. App Service Plan
+echo "[4/7] Creating App Service plan..."
+az appservice plan create \
+  --name "$PLAN_NAME" \
+  --resource-group "$RG" \
+  --location "$LOCATION" \
+  --sku B1 \
+  --is-linux \
+  --output none
+
+# 5. Web App
+echo "[5/7] Creating Web App..."
+az webapp create \
+  --name "$WEBAPP_NAME" \
+  --resource-group "$RG" \
+  --plan "$PLAN_NAME" \
+  --runtime "NODE:18-lts" \
+  --output none
+
+echo "    Web App: $WEBAPP_NAME"
+
+# 6. Generate secrets
+echo "[6/7] Generating secrets..."
+JWT_SECRET=$(openssl rand -hex 32)
+ADMIN_PASS_HASH=$(node -e "const b=require('bcryptjs'); console.log(b.hashSync('${ADMIN_PASS}', 10));" 2>/dev/null || \
+  node -e "const b=require('/usr/lib/node_modules/bcryptjs/index.js'); console.log(b.hashSync('${ADMIN_PASS}', 10));" 2>/dev/null || \
+  echo "HASH_FAILED")
+
+if [ "$ADMIN_PASS_HASH" = "HASH_FAILED" ]; then
+  # Install bcryptjs in Cloud Shell temp and retry
+  npm install bcryptjs --prefix /tmp/bcrypt --silent 2>/dev/null
+  ADMIN_PASS_HASH=$(node -e "const b=require('/tmp/bcrypt/node_modules/bcryptjs'); console.log(b.hashSync('${ADMIN_PASS}', 10));")
 fi
 
-echo "This script will create: resource group, storage account + container, postgres flexible server, and App Service plan + Web App."
-read -p "Azure subscription id: " SUBSCRIPTION_ID
-read -p "Azure region (e.g. eastus): " LOCATION
-read -p "Resource group name (e.g. resourcing-rg): " RG
-read -p "Storage account name (globally unique, lowercase) e.g. resourcingst$RANDOM: " STORAGE
-read -p "Postgres server name (globally unique) e.g. resourcingpg$RANDOM: " PG
-read -p "Admin username for Postgres: " PG_ADMIN
-read -s -p "Admin password for Postgres (will be shown once): " PG_PASS
-echo
-read -p "App Service name (web app) e.g. resourcing-app: " APP_NAME
+# 7. Configure App Settings
+echo "[7/7] Configuring App Settings..."
+az webapp config appsettings set \
+  --name "$WEBAPP_NAME" \
+  --resource-group "$RG" \
+  --settings \
+    JWT_SECRET="$JWT_SECRET" \
+    ADMIN_USER="admin" \
+    ADMIN_PASS_HASH="$ADMIN_PASS_HASH" \
+    AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONN" \
+    AZURE_STORAGE_CONTAINER="cvs" \
+    DATABASE_URL="$DATABASE_URL" \
+    WEBSITE_NODE_DEFAULT_VERSION="~18" \
+  --output none
 
-az account set --subscription "$SUBSCRIPTION_ID"
+# Get Publish Profile
+PUBLISH_PROFILE=$(az webapp deployment list-publishing-profiles \
+  --name "$WEBAPP_NAME" \
+  --resource-group "$RG" \
+  --xml)
 
-echo "Creating resource group $RG in $LOCATION"
-az group create -n "$RG" -l "$LOCATION"
-
-echo "Creating Storage account $STORAGE"
-az storage account create -n "$STORAGE" -g "$RG" -l "$LOCATION" --sku Standard_LRS --kind StorageV2
-
-echo "Creating storage container 'cvs'"
-AZ_CONN=$(az storage account show-connection-string -n "$STORAGE" -g "$RG" --query connectionString -o tsv)
-az storage container create --name cvs --account-name "$STORAGE" --connection-string "$AZ_CONN" || true
-
-echo "Creating Azure Database for PostgreSQL Flexible Server $PG"
-# Prefer a small Burstable SKU, but fall back to a safe GeneralPurpose SKU automatically (reduces interactive failures).
-PG_BURST_SKU="Standard_B1ms"
-PG_FALLBACK_SKU="standard_d2s_v3"
-
-set +e
-echo "Trying Burstable SKU: $PG_BURST_SKU (may not be available in all regions)"
-az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_BURST_SKU --tier Burstable --version 13 --storage-size 32
-RC=$?
-set -e
-if [ $RC -ne 0 ]; then
-  echo "Default Burstable SKU $PG_BURST_SKU not available in $LOCATION. Attempting fallback GeneralPurpose SKU: $PG_FALLBACK_SKU"
-  set +e
-  az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_FALLBACK_SKU --tier GeneralPurpose --version 13 --storage-size 32
-  RC2=$?
-  set -e
-  if [ $RC2 -ne 0 ]; then
-    echo "Fallback SKU $PG_FALLBACK_SKU also failed in $LOCATION. Listing available SKUs for the location:" 
-    az postgres flexible-server list-skus -l "$LOCATION" -o table || true
-    read -p "Enter an alternate sku-name from the list above (e.g. standard_d2s_v3): " PG_SKU
-    echo "Attempting creation with sku $PG_SKU (GeneralPurpose tier)..."
-    az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name "$PG_SKU" --tier GeneralPurpose --version 13 --storage-size 32
-  fi
-fi
-
-echo "Create a firewall rule to allow public access from Azure services (you may want to restrict)"
-az postgres flexible-server firewall-rule create -g "$RG" --name "$PG" --rule-name allow_az --start-ip-address 0.0.0.0 --end-ip-address 0.0.0.0
-
-PG_HOST=$(az postgres flexible-server show -g "$RG" -n "$PG" --query fullyQualifiedDomainName -o tsv)
-DATABASE_URL="postgresql://$PG_ADMIN:$PG_PASS@$PG_HOST:5432/postgres"
-
-echo "Creating App Service plan and Web App"
-az appservice plan create -g "$RG" -n "${APP_NAME}-plan" --is-linux --sku B1
-az webapp create -g "$RG" -p "${APP_NAME}-plan" -n "$APP_NAME" --runtime "NODE|18-lts"
-
-echo
-echo "Provisioning complete. Outputs you need to set as GitHub secrets or App Settings:" 
-echo "AZURE_STORAGE_CONNECTION_STRING='$AZ_CONN'"
-echo "AZURE_STORAGE_CONTAINER='cvs'"
-echo "DATABASE_URL='$DATABASE_URL'"
-echo "AZURE_WEBAPP_NAME='$APP_NAME'"
-echo "AZURE_RESOURCE_GROUP='$RG'"
-
-echo
-echo "You should create an Admin password hash for the web app and a JWT secret. Run locally:"
-echo "  node hash-password.js" 
-echo "and generate a random JWT_SECRET (e.g. openssl rand -hex 32)"
-
-echo
-echo "If you want to setup GitHub Actions deployment, create the following repository secrets:"
-echo "  AZURE_WEBAPP_NAME, AZURE_WEBAPP_PUBLISH_PROFILE (download from az webapp deployment list-publishing-profiles),"
-echo "  AZURE_RESOURCE_GROUP, AZURE_CREDENTIALS (optional for az CLI actions), JWT_SECRET, ADMIN_USER, ADMIN_PASS_HASH, AZURE_STORAGE_CONNECTION_STRING, AZURE_STORAGE_CONTAINER, DATABASE_URL"
+echo ""
+echo "╔══════════════════════════════════════════════════════════════════╗"
+echo "║                  PROVISIONING COMPLETE                          ║"
+echo "╠══════════════════════════════════════════════════════════════════╣"
+echo "║  App URL:  https://${WEBAPP_NAME}.azurewebsites.net"
+echo "║  Login:    admin / ${ADMIN_PASS}"
+echo "╠══════════════════════════════════════════════════════════════════╣"
+echo "║  Add these 2 secrets to GitHub (repo → Settings → Secrets):    ║"
+echo "╠══════════════════════════════════════════════════════════════════╣"
+echo "  AZURE_WEBAPP_NAME = $WEBAPP_NAME"
+echo ""
+echo "  AZURE_WEBAPP_PUBLISH_PROFILE ="
+echo "$PUBLISH_PROFILE"
+echo "╚══════════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Once secrets are added, push to main branch to deploy:"
+echo "  git push origin main"

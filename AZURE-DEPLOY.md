@@ -15,154 +15,49 @@ No local Azure CLI needed. All commands run in **Azure Cloud Shell** (browser-ba
 
 ---
 
-## Part 2 — Run Provisioning Commands
+## Part 2 — Run the Provisioning Script
 
-Copy and paste the block below into Cloud Shell. **Edit the variables at the top first** — especially `PG_PASS`, `ADMIN_PASS`, and optionally `LOCATION`.
+The repo already contains the script. In Cloud Shell:
 
 ```bash
-# ─── EDIT THESE ──────────────────────────────────────────────────────────────
-LOCATION="eastus"          # Azure region (eastus, westeurope, uksouth, etc.)
-PG_PASS="Change_Me_123!"   # PostgreSQL admin password (min 8 chars, mixed case + special)
-ADMIN_PASS="MyAppPass1!"   # Login password for the resourcing web app
-# ─────────────────────────────────────────────────────────────────────────────
+# Pull latest code
+cd resourcing-app && git pull origin main
 
-# Auto-generated unique names (safe to leave as-is)
-SUFFIX=$(openssl rand -hex 3)
-RG="resourcing-rg"
-STORAGE_NAME="resourcingcvs${SUFFIX}"
-PG_SERVER="resourcing-pg-${SUFFIX}"
-PG_ADMIN="pgadmin"
-PG_DB="postgres"
-WEBAPP_NAME="resourcing-app-${SUFFIX}"
-PLAN_NAME="resourcing-plan"
-
-echo "Resources will be created with suffix: $SUFFIX"
-echo "Web app URL will be: https://${WEBAPP_NAME}.azurewebsites.net"
-
-# 1. Resource Group
-az group create --name $RG --location $LOCATION
-
-# 2. Storage Account + Blob Container
-az storage account create \
-  --name $STORAGE_NAME \
-  --resource-group $RG \
-  --location $LOCATION \
-  --sku Standard_LRS \
-  --kind StorageV2
-
-STORAGE_CONN=$(az storage account show-connection-string \
-  --name $STORAGE_NAME \
-  --resource-group $RG \
-  --query connectionString -o tsv)
-
-az storage container create \
-  --name cvs \
-  --connection-string "$STORAGE_CONN"
-
-echo "✓ Storage ready"
-
-# 3. PostgreSQL Flexible Server (Burstable B1ms = cheapest)
-az postgres flexible-server create \
-  --resource-group $RG \
-  --name $PG_SERVER \
-  --location $LOCATION \
-  --admin-user $PG_ADMIN \
-  --admin-password "$PG_PASS" \
-  --sku-name Standard_B1ms \
-  --tier Burstable \
-  --version 15 \
-  --storage-size 32 \
-  --public-access 0.0.0.0
-
-DATABASE_URL="postgresql://${PG_ADMIN}:${PG_PASS}@${PG_SERVER}.postgres.database.azure.com:5432/${PG_DB}?sslmode=require"
-
-echo "✓ PostgreSQL ready"
-
-# 4. App Service Plan (B1 = cheapest always-on Linux plan)
-az appservice plan create \
-  --name $PLAN_NAME \
-  --resource-group $RG \
-  --location $LOCATION \
-  --sku B1 \
-  --is-linux
-
-# 5. Web App (Node 18)
-az webapp create \
-  --name $WEBAPP_NAME \
-  --resource-group $RG \
-  --plan $PLAN_NAME \
-  --runtime "NODE:18-lts"
-
-echo "✓ Web App created"
-
-# 6. Generate secrets
-JWT_SECRET=$(openssl rand -hex 32)
-ADMIN_PASS_HASH=$(node -e "const b=require('bcryptjs'); console.log(b.hashSync('${ADMIN_PASS}', 10));")
-
-# 7. Set App Settings (env vars — persist across all redeployments)
-az webapp config appsettings set \
-  --name $WEBAPP_NAME \
-  --resource-group $RG \
-  --settings \
-    JWT_SECRET="$JWT_SECRET" \
-    ADMIN_USER="admin" \
-    ADMIN_PASS_HASH="$ADMIN_PASS_HASH" \
-    AZURE_STORAGE_CONNECTION_STRING="$STORAGE_CONN" \
-    AZURE_STORAGE_CONTAINER="cvs" \
-    DATABASE_URL="$DATABASE_URL" \
-    WEBSITE_NODE_DEFAULT_VERSION="~18"
-
-echo "✓ App Settings configured"
-
-# 8. Print the values you need for GitHub Secrets
-echo ""
-echo "════════════════════════════════════════════"
-echo " SAVE THESE — needed for GitHub Secrets"
-echo "════════════════════════════════════════════"
-echo "AZURE_WEBAPP_NAME    = $WEBAPP_NAME"
-echo "AZURE_RESOURCE_GROUP = $RG"
-echo ""
-echo "App URL: https://${WEBAPP_NAME}.azurewebsites.net"
-echo "Login:   admin / ${ADMIN_PASS}"
-echo "════════════════════════════════════════════"
+# Edit the 3 variables at the top (LOCATION, PG_PASS, ADMIN_PASS)
+nano scripts/provision-azure.sh
 ```
+
+Save and exit nano: `Ctrl+O` → `Enter` → `Ctrl+X`
+
+Then run it:
+```bash
+bash scripts/provision-azure.sh
+```
+
+The script takes ~5 minutes. At the end it prints:
+- Your **app URL** and **login credentials**
+- The **`AZURE_WEBAPP_NAME`** value
+- The **Publish Profile XML** — copy everything between the `=` line and the closing border
 
 ---
 
-## Part 3 — Get the Publish Profile (for GitHub)
-
-Run this in Cloud Shell right after Part 2 (variables are still set):
-
-```bash
-az webapp deployment list-publishing-profiles \
-  --name $WEBAPP_NAME \
-  --resource-group $RG \
-  --xml
-```
-
-**Copy the entire XML output** — you'll paste it into GitHub in the next step.
-
----
-
-## Part 4 — Add GitHub Secrets
+## Part 3 — Add GitHub Secrets
 
 1. Go to your GitHub repo → **Settings** → **Secrets and variables** → **Actions**
-2. Add these two secrets:
+2. Add these two secrets using the values printed by the script:
 
    | Secret Name | Value |
    |-------------|-------|
-   | `AZURE_WEBAPP_NAME` | the `WEBAPP_NAME` printed in Part 2 (e.g. `resourcing-app-a1b2c3`) |
-   | `AZURE_WEBAPP_PUBLISH_PROFILE` | the full XML from Part 3 |
+   | `AZURE_WEBAPP_NAME` | printed as `AZURE_WEBAPP_NAME = resourcing-app-xxxxxx` |
+   | `AZURE_WEBAPP_PUBLISH_PROFILE` | the full XML block printed at the end of the script |
 
 ---
 
-## Part 5 — Deploy
+## Part 4 — Deploy
 
-Push to `main` and GitHub Actions deploys automatically:
+Push to `main` — GitHub Actions deploys automatically:
 
 ```bash
-git add .
-git commit -m "deploy to azure"
 git push origin main
 ```
 
