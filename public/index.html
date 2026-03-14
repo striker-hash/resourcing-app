@@ -128,7 +128,6 @@
         loadList();
       }
 
-        // Safe client-side download: fetch the file with credentials, check response, then save as blob.
         async function downloadCV(filename){
           try{
             const token = localStorage.getItem('token');
@@ -139,15 +138,28 @@
               alert('Download failed: ' + (msg || resp.status));
               return;
             }
-            const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
+            const data = await resp.json();
+            if(data.url){
+              // Azure SAS URL — open directly (no auth header needed)
+              const a = document.createElement('a');
+              a.href = data.url;
+              a.download = filename;
+              a.target = '_blank';
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+            } else {
+              // Local fallback: server sends the file as a blob
+              const blob = await (await fetch(data.localUrl || '/cv/'+encodeURIComponent(filename)+'?dl=1')).blob();
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = filename;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(url);
+            }
           }catch(err){
             alert('Download error: '+(err && err.message ? err.message : err));
           }

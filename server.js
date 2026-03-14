@@ -182,7 +182,7 @@ app.get('/cv/:filename', authRequired, async (req, res) => {
         permissions: BlobSASPermissions.parse('r'),
         expiresOn: expiry,
       });
-      return res.redirect(sasUrl);
+      return res.json({ ok: true, url: sasUrl });
     } catch (e) { console.error('azure get', e.message); return res.status(500).send('error'); }
   }
   // local fallback
