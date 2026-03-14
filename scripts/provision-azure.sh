@@ -45,7 +45,7 @@ if [ $RC -ne 0 ]; then
   az postgres flexible-server list-skus -l "$LOCATION" --query "[?contains(tier, 'GeneralPurpose')].[name]" -o table || true
   read -p "Enter an alternate sku-name from the list above (e.g. standard_d2s_v3): " PG_SKU
   echo "Attempting creation with sku $PG_SKU (GeneralPurpose tier)..."
-  az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_SKU --version 13 --storage-size 32
+  az postgres flexible-server create -g "$RG" -n "$PG" -l "$LOCATION" --admin-user "$PG_ADMIN" --admin-password "$PG_PASS" --sku-name $PG_SKU --tier GeneralPurpose --version 13 --storage-size 32
 fi
 
 echo "Create a firewall rule to allow public access from Azure services (you may want to restrict)"
