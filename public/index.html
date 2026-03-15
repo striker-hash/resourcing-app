@@ -181,6 +181,16 @@
           <label>Referred by</label>
           <input name="referredBy" type="text" placeholder="Name or source">
         </div>
+        <div>
+          <label>Availability</label>
+          <select name="availability">
+            <option value="">Select type</option>
+            <option>Freelancer</option>
+            <option>Full-time</option>
+            <option>Contract</option>
+            <option>Part-time</option>
+          </select>
+        </div>
         <div class="span2">
           <label>Skills (comma separated)</label>
           <input name="skills" type="text" placeholder="e.g. Python, SQL, Azure">
@@ -288,6 +298,7 @@
       const initials = (c.name || '?').split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
       const sen = (c.seniority || '').toLowerCase();
       const badgeClass = sen === 'junior' ? 'badge-junior' : sen === 'mid' ? 'badge-mid' : sen === 'senior' ? 'badge-senior' : 'badge-default';
+      const avail = c.availability || '';
       const skills = (c.skills || []).map(s => `<span class="skill-tag">${escHtml(s)}</span>`).join('');
       const row = document.createElement('div');
       row.className = 'candidate-row';
@@ -299,6 +310,7 @@
           ${skills ? '<div class="candidate-skills">' + skills + '</div>' : ''}
         </div>
         <div class="candidate-actions">
+          ${avail ? `<span class="badge badge-default" style="background:#f0fdf4;color:#166534;border:1px solid #bbf7d0">${escHtml(avail)}</span>` : ''}
           ${c.seniority ? `<span class="badge ${badgeClass}">${escHtml(c.seniority)}</span>` : ''}
           <button class="btn-link" onclick="downloadCV('${c.filename.replace(/'/g, "\\'")}')">
             <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m-4-4l4 4 4-4"/></svg>

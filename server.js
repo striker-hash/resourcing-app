@@ -46,10 +46,14 @@ if (DATABASE_URL) {
       referredby text,
       filename text,
       path text,
-      uploaded_at timestamptz
+      uploaded_at timestamptz,
+      status text
     );`;
     try {
       await pg.query(create);
+      // migrate existing tables that don't have status column yet
+      await pg.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS status text`);
+      await pg.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS availability text`);
       console.log('Postgres ready');
     } catch (e) {
       console.error('pg init', e.message);
@@ -93,7 +97,7 @@ app.post('/api/login', (req, res) => {
 // upload
 app.post('/api/upload', authRequired, upload.single('cv'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'file required' });
-  const { name, role, skills, seniority, referredBy } = req.body;
+  const { name, role, skills, seniority, referredBy, status, availability } = req.body;
   const ts = Date.now();
   const safe = req.file.originalname.replace(/[^a-zA-Z0-9.\.-_ ]/g, '_');
   const filename = `${ts}_${safe}`;
@@ -125,14 +129,16 @@ app.post('/api/upload', authRequired, upload.single('cv'), async (req, res) => {
     referredby: referredBy || '',
     filename,
     path: pathInStorage,
-    uploaded_at: new Date().toISOString()
+    uploaded_at: new Date().toISOString(),
+    status: status || '',
+    availability: availability || ''
   };
 
   if (pg) {
-    const sql = `INSERT INTO candidates(id,name,role,skills,seniority,referredby,filename,path,uploaded_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`;
+    const sql = `INSERT INTO candidates(id,name,role,skills,seniority,referredby,filename,path,uploaded_at,status,availability)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`;
     try {
-      await pg.query(sql, [candidate.id, candidate.name, candidate.role, candidate.skills, candidate.seniority, candidate.referredby, candidate.filename, candidate.path, candidate.uploaded_at]);
+      await pg.query(sql, [candidate.id, candidate.name, candidate.role, candidate.skills, candidate.seniority, candidate.referredby, candidate.filename, candidate.path, candidate.uploaded_at, candidate.status, candidate.availability]);
     } catch (e) {
       console.error('pg insert', e.message);
       return res.status(500).json({ error: 'db error' });
@@ -217,6 +223,17 @@ app.delete('/api/candidates/:id', authRequired, async (req, res) => {
   }
   const DB_FILE = path.join(__dirname, 'data', 'db.json');
   try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); current.candidates = (current.candidates || []).filter(c => c.id !== id); fs.writeFileSync(DB_FILE, JSON.stringify(current, null, 2)); return res.json({ ok: true }); } catch (e) { return res.status(500).json({ error: 'err' }); }
+});
+
+// update fields
+app.patch('/api/candidates/:id', authRequired, async (req, res) => {
+  const id = req.params.id;
+  const { status, availability } = req.body;
+  if (pg) {
+    try { await pg.query('UPDATE candidates SET status=$1, availability=$2 WHERE id=$3', [status, availability, id]); return res.json({ ok: true }); } catch (e) { console.error('pg patch', e.message); return res.status(500).json({ error: 'db' }); }
+  }
+  const DB_FILE = path.join(__dirname, 'data', 'db.json');
+  try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); const c = (current.candidates || []).find(c => c.id === id); if (c) { c.status = status; c.availability = availability; } fs.writeFileSync(DB_FILE, JSON.stringify(current, null, 2)); return res.json({ ok: true }); } catch (e) { return res.status(500).json({ error: 'err' }); }
 });
 
 // report
