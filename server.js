@@ -225,15 +225,28 @@ app.delete('/api/candidates/:id', authRequired, async (req, res) => {
   try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); current.candidates = (current.candidates || []).filter(c => c.id !== id); fs.writeFileSync(DB_FILE, JSON.stringify(current, null, 2)); return res.json({ ok: true }); } catch (e) { return res.status(500).json({ error: 'err' }); }
 });
 
-// update fields
+// update candidate
 app.patch('/api/candidates/:id', authRequired, async (req, res) => {
   const id = req.params.id;
-  const { status, availability } = req.body;
+  const { name, role, skills, seniority, referredBy, status, availability } = req.body;
+  const skillsArr = Array.isArray(skills) ? skills : (skills || '').split(',').map(s => s.trim()).filter(Boolean);
   if (pg) {
-    try { await pg.query('UPDATE candidates SET status=$1, availability=$2 WHERE id=$3', [status, availability, id]); return res.json({ ok: true }); } catch (e) { console.error('pg patch', e.message); return res.status(500).json({ error: 'db' }); }
+    try {
+      await pg.query(
+        'UPDATE candidates SET name=$1,role=$2,skills=$3,seniority=$4,referredby=$5,status=$6,availability=$7 WHERE id=$8',
+        [name, role, skillsArr, seniority, referredBy || '', status || '', availability || '', id]
+      );
+      return res.json({ ok: true });
+    } catch (e) { console.error('pg patch', e.message); return res.status(500).json({ error: 'db' }); }
   }
   const DB_FILE = path.join(__dirname, 'data', 'db.json');
-  try { const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); const c = (current.candidates || []).find(c => c.id === id); if (c) { c.status = status; c.availability = availability; } fs.writeFileSync(DB_FILE, JSON.stringify(current, null, 2)); return res.json({ ok: true }); } catch (e) { return res.status(500).json({ error: 'err' }); }
+  try {
+    const current = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    const c = (current.candidates || []).find(c => c.id === id);
+    if (c) { c.name = name; c.role = role; c.skills = skillsArr; c.seniority = seniority; c.referredby = referredBy || ''; c.status = status || ''; c.availability = availability || ''; }
+    fs.writeFileSync(DB_FILE, JSON.stringify(current, null, 2));
+    return res.json({ ok: true });
+  } catch (e) { return res.status(500).json({ error: 'err' }); }
 });
 
 // report
